@@ -6,12 +6,22 @@ import (
   "github.com/stianeikeland/go-rpio"
 )
 
-const SPEED_OF_SOUND = 34320 // in cm per second
+const SPEED_OF_SOUND = 34320.0 // in cm per second
+const READ_INTERVAL = 10 * time.Microsecond // pause between two readings
 
 var (
   echoPin rpio.Pin
   triggerPin rpio.Pin
+  // default max distance: 150cm
+  timeout = 300 * time.Second / SPEED_OF_SOUND
 )
+
+/**
+ * sets the timeout based on the max distance in cm
+ */
+func SetMaxDistance(cm int) () {
+  timeout = time.Duration(cm * 2) * time.Second / SPEED_OF_SOUND;
+}
 
 func ReadAverageDistance(numberOfReads int) (float64) {
   if (numberOfReads < 1) {
@@ -25,7 +35,7 @@ func ReadAverageDistance(numberOfReads int) (float64) {
   for reads < limit {
     sum = sum + ReadDistance()
     reads = reads + 1.0
-    time.Sleep(10 * time.Millisecond)
+    time.Sleep(READ_INTERVAL)
   }
 
   return sum / reads
@@ -33,36 +43,55 @@ func ReadAverageDistance(numberOfReads int) (float64) {
 
 func ReadDistance() (float64) {
   var res rpio.State
-  var start, stop time.Time
-  var duration int
-  fmt.Println("Read distance in cm")
+  var start, echoTimeout time.Time
+
+  // make sure trigger is low
+  triggerPin.Low()
+  time.Sleep(2 * time.Microsecond)
+
+  // calculate timeout for echo
+  to := time.Now().Add(timeout + (100 * time.Microsecond))
 
   // trigger a 10µs burst
-  fmt.Printf("Trigger burst for %dns\n", 10 * time.Microsecond)
   triggerPin.High()
   time.Sleep(10 * time.Microsecond)
   triggerPin.Low()
 
   // wait for echo
-  fmt.Println("Wait for echo ...")
   res = echoPin.Read()
   for (res == rpio.Low) {
+    res = echoPin.Read()
     start = time.Now()
-    res = echoPin.Read()
+    if (start.After(to)) {
+      fmt.Println("timeout while waiting on echo")
+      return -1
+    }
   }
 
-  fmt.Println("Wait for echo end ...")
-
+  echoTimeout = start
+  echoTimeout = echoTimeout.Add(timeout)
   for (res == rpio.High) {
-    stop = time.Now()
     res = echoPin.Read()
+    if (time.Now().After(echoTimeout)) {
+      fmt.Println("timeout while high")
+      return -1
+    }
   }
 
-  duration = stop.Nanosecond() - start.Nanosecond()
+  duration := time.Since(start).Seconds()
 
-  fmt.Printf("duration: %d\n (start: %d - stop: %d)\n", duration, stop.Nanosecond(), start.Nanosecond())
+  // fmt.Printf("duration: %.10fs\n", duration);
 
-  distance := float64(SPEED_OF_SOUND) / 2.0 * float64(duration) / 1000000000.0
+  distance := SPEED_OF_SOUND / 2.0 * duration
+
+  // fmt.Printf("distance: %.2fcm\n", distance)
+
+  if (distance < 0) {
+    // something went wrong
+    // try again
+    time.Sleep(READ_INTERVAL)
+    return ReadDistance()
+  }
 
   return distance
 }
@@ -74,7 +103,7 @@ func Init(echo int, trigger int) (err error) {
     return
   }
 
-  fmt.Printf("echo pin: %d - trigger pin: %d\n", echo, trigger)
+  fmt.Printf("echo pin: %d - trigger pin: %d - timeout: %.10fs\n", echo, trigger, timeout.Seconds())
 
   echoPin = rpio.Pin(echo)
   echoPin.Input()
